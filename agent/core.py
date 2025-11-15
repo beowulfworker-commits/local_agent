@@ -1,22 +1,3 @@
-"""
-Core agent logic.
-
-The :class:`Agent` class orchestrates interactions between the user, the
-language model backend, and the registered tools. It maintains a conversation
-history and can operate in two modes:
-
-1. Pure chat mode: the agent simply forwards messages to the model and
-   returns its responses.
-2. Tool-enabled mode: the model is instructed about available tools and may
-   request tool invocations by returning a JSON structure. The agent parses
-   these requests, calls the appropriate tool, and returns the tool output
-   back to the user.
-
-This implementation uses a simple protocol where the model should respond
-with a JSON object of the form ``{"tool": {"name": ..., "args": {...}}}`` to
-invoke a tool. Any other response is treated as a normal assistant reply.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -29,17 +10,15 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from .llm_backend import LLMBackend
-from .tools import Tool
+from agent.tools import Tool  # type: ignore
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class Agent:
     """Local AI agent orchestrating an LLM and a set of tools."""
-
     backend: LLMBackend
-    tools_config: str
+    tools_config: str = "agent/config/tools.yaml"
     history: List[Dict[str, str]] = field(default_factory=list)
     tools: Dict[str, Tool] = field(init=False)
 
@@ -47,82 +26,81 @@ class Agent:
         self.tools = self._load_tools(self.tools_config)
 
     def _load_tools(self, config_path: str) -> Dict[str, Tool]:
-        """Load tools defined in a YAML configuration file."""
         if not os.path.isabs(config_path):
-            # resolve relative to repository root
-            config_path = os.path.join(os.path.dirname(__file__), os.pardir, config_path)
-            config_path = os.path.abspath(config_path)
+            config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, config_path))
         with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {}
         tools: Dict[str, Tool] = {}
         for entry in config.get("tools", []):
             name = entry["name"]
             module_name = entry["module"]
-            class_name = entry.get("class") or name.capitalize() + "Tool"
-            logger.debug("Loading tool %s from %s:%s", name, module_name, class_name)
+            class_name = entry.get("class") or f"{name.capitalize()}Tool"
             module = importlib.import_module(module_name)
             cls = getattr(module, class_name)
             tools[name] = cls()
+            logger.info("Loaded tool: %s from %s:%s", name, module_name, class_name)
         return tools
 
     def _build_system_prompt(self) -> str:
-        """Construct a system prompt describing the available tools."""
         lines = [
-            "You are a local AI agent. The user may ask you to perform tasks.",
-            "You have access to the following tools:",
+            "You are a local assistant with tool-calling ability.",
+            "Available tools:",
         ]
         for tool in self.tools.values():
             lines.append(f"- {tool.name}: {tool.description}. Input schema: {tool.input_schema}")
-        lines.append(
-            "When you decide to use a tool, respond with a JSON object in the following format:"
-        )
-        lines.append(
-            '{"tool": {"name": "<tool_name>", "args": {"param1": "value", ...}}}'
-        )
-        lines.append(
-            "Do not wrap the JSON in code fences or include any additional text."
-        )
+        lines.append('When you decide to use a tool, respond with JSON exactly as:')
+        lines.append('{"tool": {"name": "<tool_name>", "args": {"param1": "value"}}}')
+        lines.append("No code fences. No extra text.")
         return "\n".join(lines)
 
-    def chat(self, message: str, *, use_tools: bool = False) -> str:
-        """
-        Handle a single message from the user and return the agent's reply.
-
-        :param message: The user's message.
-        :param use_tools: Whether to allow the model to call tools.
-        :returns: The agent's reply (either the model's answer or tool output).
-        """
-        logger.info("User: %s", message)
-        system_prompt: Optional[str] = None
-        prompt = message
-        if use_tools:
-            system_prompt = self._build_system_prompt()
-        response = self.backend.generate(prompt=prompt, history=self.history, system_prompt=system_prompt)
-        # Try to parse a tool request
-        reply = response.strip()
-        if use_tools and reply.startswith("{"):
+    def _try_extract_tool_call(self, text: str) -> Optional[Dict[str, Any]]:
+        text = text.strip()
+        # Fast path: whole message is JSON
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and "tool" in obj:
+                return obj
+        except Exception:
+            pass
+        # Tolerant path: try first {...} block
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
             try:
-                data = json.loads(reply)
-                tool_info = data.get("tool")
-                if tool_info:
-                    tool_name: str = tool_info.get("name")
-                    args: Dict[str, Any] = tool_info.get("args", {})
-                    tool = self.tools.get(tool_name)
+                obj = json.loads(text[start : end + 1])
+                if isinstance(obj, dict) and "tool" in obj:
+                    return obj
+            except Exception:
+                pass
+        return None
+
+    def chat(self, message: str, *, use_tools: bool = False) -> str:
+        logger.info("User: %s", message)
+        system_prompt = self._build_system_prompt() if use_tools else None
+        response = self.backend.generate(prompt=message, history=self.history, system_prompt=system_prompt)
+        reply = response.strip()
+
+        if use_tools:
+            tool_obj = self._try_extract_tool_call(reply)
+            if tool_obj:
+                try:
+                    req = tool_obj["tool"]
+                    name = req.get("name")
+                    args: Dict[str, Any] = req.get("args") or {}
+                    tool = self.tools.get(name)
                     if not tool:
-                        raise ValueError(f"Unknown tool: {tool_name}")
-                    logger.info("Invoking tool %s with args %s", tool_name, args)
+                        return json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False)
                     result = tool.run(**args)
-                    # Add the tool invocation to the history
+                    # log into history
                     self.history.append({"role": "user", "content": message})
                     self.history.append({"role": "assistant", "content": reply})
-                    # Provide tool result as assistant message
-                    result_str = json.dumps(result, ensure_ascii=False)
-                    self.history.append({"role": "assistant", "content": result_str})
-                    return result_str
-            except Exception as e:
-                logger.exception("Failed to parse tool call: %s", e)
-                # Fall through to normal response
-        # Otherwise treat as normal chat
+                    self.history.append({"role": "assistant", "content": json.dumps(result, ensure_ascii=False)})
+                    return json.dumps(result, ensure_ascii=False)
+                except Exception as e:
+                    logger.exception("Tool call failed: %s", e)
+                    return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+        # normal chat
         self.history.append({"role": "user", "content": message})
         self.history.append({"role": "assistant", "content": reply})
         return reply
