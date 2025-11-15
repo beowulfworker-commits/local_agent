@@ -1,80 +1,57 @@
-"""
-File search tool for the agent.
-
-This tool searches for a text query within files in the repository. It returns
-the list of occurrences with file paths and line numbers, up to a maximum
-number of matches. Only text files (with certain extensions) are scanned.
-"""
-
 from __future__ import annotations
 
 import os
 import re
 from typing import Any, Dict, List
-
 from . import Tool
 
-
 class FileSearchTool:
-    """Tool for searching text in files within the repository."""
+    """Search for a string or regex pattern across repository files."""
 
     name = "file_search"
-    description = "Search for a string or regex pattern in repository files and return occurrences."
-    input_schema: Dict[str, Any] = {
-        "query": {
-            "type": "string",
-            "description": "String or regular expression to search for.",
-        },
-        "max_results": {
-            "type": "integer",
-            "description": "Maximum number of matches to return.",
-            "default": 20,
-        },
+    description = "Search for a string or regex pattern in repository files."
+    input_schema = {
+        "query": {"type": "string", "required": True, "description": "Search text or regex"},
+        "regex": {"type": "boolean", "default": False},
+        "max_results": {"type": "integer", "default": 100},
     }
 
-    # Define a simple list of file extensions to include in the search
-    TEXT_EXTENSIONS = {
-        ".py", ".md", ".txt", ".yaml", ".yml", ".json", ".sh", ".ps1",
-        ".ini", ".cfg", ".toml", ".js", ".ts", ".html", ".css"
-    }
+    _IGNORE_DIRS = {".git", "__pycache__", "venv", "node_modules", ".mypy_cache"}
+    _TEXT_EXT = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".ps1", ".html", ".css", ".js"}
 
     def __init__(self, repo_root: str | None = None) -> None:
-        self.repo_root = (
-            repo_root
-            if repo_root is not None
-            else os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        self.repo_root = os.path.abspath(
+            repo_root or os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
         )
+
+    def _is_text_file(self, path: str) -> bool:
+        return os.path.splitext(path)[1].lower() in self._TEXT_EXT
 
     def run(self, **kwargs: Any) -> Dict[str, Any]:
         query = kwargs.get("query")
-        max_results = int(kwargs.get("max_results", 20))
+        regex = bool(kwargs.get("regex", False))
+        max_results = int(kwargs.get("max_results", 100))
         if not query:
             raise ValueError("'query' argument is required")
-        pattern = re.compile(query, re.IGNORECASE)
+
+        pattern = re.compile(query if regex else re.escape(query), re.IGNORECASE)
         matches: List[Dict[str, Any]] = []
 
         for root, dirs, files in os.walk(self.repo_root):
-            for fname in files:
-                _, ext = os.path.splitext(fname)
-                if ext.lower() not in self.TEXT_EXTENSIONS:
+            # prune ignored directories
+            dirs[:] = [d for d in dirs if d not in self._IGNORE_DIRS]
+            for fn in files:
+                full = os.path.join(root, fn)
+                if not self._is_text_file(full):
                     continue
-                file_path = os.path.join(root, fname)
-                rel_path = os.path.relpath(file_path, self.repo_root)
+                rel = os.path.relpath(full, self.repo_root)
                 try:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        for lineno, line in enumerate(f, start=1):
+                    with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                        for lineno, line in enumerate(f, 1):
                             if pattern.search(line):
-                                matches.append({
-                                    "file": rel_path,
-                                    "line": lineno,
-                                    "text": line.strip(),
-                                })
+                                matches.append({"file": rel, "line": lineno, "text": line.rstrip("\n")})
                                 if len(matches) >= max_results:
                                     return {"matches": matches, "truncated": True}
                 except Exception:
-                    # Ignore files we cannot read
                     continue
         return {"matches": matches, "truncated": False}
-
-
-ToolImpl = FileSearchTool
