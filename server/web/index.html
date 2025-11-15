@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local Qwen Agent</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5; }
+    .container { max-width: 800px; margin: 40px auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    #messages { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; background: #fafafa; }
+    .message { margin-bottom: 10px; }
+    .message.user { text-align: right; }
+    .message.agent { text-align: left; }
+    .message .text { display: inline-block; padding: 8px 12px; border-radius: 6px; }
+    .message.user .text { background: #d0eaff; }
+    .message.agent .text { background: #e6e6e6; }
+    #input-area { display: flex; gap: 10px; }
+    #input-area input[type="text"] { flex: 1; padding: 8px; }
+    #input-area button { padding: 8px 16px; }
+    #tools-toggle { margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Local Qwen Agent</h1>
+    <div id="tools-toggle">
+      <label><input type="checkbox" id="use-tools"> Enable tool calls</label>
+    </div>
+    <div id="messages"></div>
+    <div id="input-area">
+      <input type="text" id="user-input" placeholder="Type your message here..." autocomplete="off" />
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+  <script>
+    const messagesEl = document.getElementById('messages');
+    const userInputEl = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    const useToolsEl = document.getElementById('use-tools');
+
+    function addMessage(text, role) {
+      const msgDiv = document.createElement('div');
+      msgDiv.className = 'message ' + role;
+      const span = document.createElement('span');
+      span.className = 'text';
+      span.textContent = text;
+      msgDiv.appendChild(span);
+      messagesEl.appendChild(msgDiv);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = userInputEl.value.trim();
+      if (!text) return;
+      addMessage(text, 'user');
+      userInputEl.value = '';
+      try {
+        const resp = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, use_tools: useToolsEl.checked })
+        });
+        if (!resp.ok) {
+          const err = await resp.json();
+          addMessage('Error: ' + (err.detail || resp.statusText), 'agent');
+        } else {
+          const data = await resp.json();
+          addMessage(data.response, 'agent');
+        }
+      } catch (err) {
+        addMessage('Error: ' + err.message, 'agent');
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    userInputEl.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>

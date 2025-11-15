@@ -1,0 +1,13 @@
+tools:
+  - name: file_reader
+    module: agent.tools.file_reader
+    class: FileReaderTool
+    description: Read the contents of a file within the repository given its relative path.
+  - name: file_search
+    module: agent.tools.file_search
+    class: FileSearchTool
+    description: Search for a string or regex pattern in repository files and return occurrences.
+  - name: logger
+    module: agent.tools.logger
+    class: LoggerTool
+    description: Append a note to notes.txt in the repository.
